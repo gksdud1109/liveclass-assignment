@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: liveclass-postgres
+    environment:
+      POSTGRES_DB: liveclass
+      POSTGRES_USER: liveclass
+      POSTGRES_PASSWORD: liveclass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U liveclass -d liveclass"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:

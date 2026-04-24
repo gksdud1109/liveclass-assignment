@@ -1,3 +1,15 @@
 spring:
   application:
     name: backend
+  profiles:
+    active: local
+  jpa:
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+
+logging:
+  level:
+    org.hibernate.SQL: debug
+    org.hibernate.orm.jdbc.bind: trace
