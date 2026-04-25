@@ -8,8 +8,8 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
-import jakarta.persistence.Index;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
@@ -17,7 +17,10 @@ import lombok.NoArgsConstructor;
 @Entity
 @Table(
 	name = "notification_attempt",
-	indexes = @Index(name = "idx_attempt_notification", columnList = "notification_id, attempt_no")
+	uniqueConstraints = @UniqueConstraint(
+		name = "uk_attempt_notification_attemptno",
+		columnNames = {"notification_id", "attempt_no"}
+	)
 )
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)

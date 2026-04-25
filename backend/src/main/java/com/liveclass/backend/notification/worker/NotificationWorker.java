@@ -53,23 +53,56 @@ public class NotificationWorker {
 		return claimed.size();
 	}
 
+	/**
+	 * 발송 전(조회/렌더링) 실패와 발송 자체의 실패는 재시도 흐름으로 흡수한다.
+	 * 그러나 <b>발송 성공 후 recordSuccess가 실패하는 경우</b>는 절대 recordFailure를
+	 * 호출하지 않는다 — 호출하면 다음 cycle에서 사용자에게 중복 발송된다.
+	 *
+	 * <p>이 경우 row는 PROCESSING으로 남고 운영 알림이 필요하다. Stage 4의 스턱 복구가
+	 * 5분 후 PENDING으로 되돌리면 중복 발송 가능 — 이 한계는 외부 채널의 idempotency 키
+	 * 없이는 분산 환경에서 본질적으로 해소 불가. README에 at-least-once 의미 명시.
+	 */
 	private void processOne(Long id) {
+		Notification notification;
+		RenderedNotification rendered;
 		try {
-			Notification notification = processingService.fetchForProcessing(id);
-			RenderedNotification rendered = renderer.render(
+			notification = processingService.fetchForProcessing(id);
+			rendered = renderer.render(
 				notification.getNotificationType(),
 				notification.getChannel(),
 				notification.getPayload()
 			);
+		} catch (Exception preSendEx) {
+			log.warn("Pre-send failure id={} reason={}", id, preSendEx.getMessage());
+			safelyRecordFailure(id, preSendEx.getMessage());
+			return;
+		}
+
+		try {
 			dispatcher.send(notification, rendered);
+		} catch (Exception sendEx) {
+			log.warn("Send failed id={} reason={}", id, sendEx.getMessage());
+			safelyRecordFailure(id, sendEx.getMessage());
+			return;
+		}
+
+		try {
 			processingService.recordSuccess(id, rendered);
-		} catch (Exception ex) {
-			log.warn("Notification send failed id={} reason={}", id, ex.getMessage());
-			try {
-				processingService.recordFailure(id, ex.getMessage());
-			} catch (Exception inner) {
-				log.error("Failed to record failure for id={}", id, inner);
-			}
+		} catch (Exception recordEx) {
+			log.error(
+				"Send succeeded but recordSuccess failed id={}. "
+					+ "Notification remains in PROCESSING; stuck recovery will eventually "
+					+ "reset to PENDING and may cause duplicate delivery — operational alert needed.",
+				id, recordEx
+			);
+		}
+	}
+
+	private void safelyRecordFailure(Long id, String message) {
+		try {
+			processingService.recordFailure(id, message);
+		} catch (Exception inner) {
+			log.error("Failed to record failure for id={}", id, inner);
 		}
 	}
 }

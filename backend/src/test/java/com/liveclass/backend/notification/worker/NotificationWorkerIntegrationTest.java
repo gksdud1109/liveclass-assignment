@@ -3,6 +3,8 @@ package com.liveclass.backend.notification.worker;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -49,7 +51,7 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 	@Autowired
 	private NotificationAttemptRepository attemptRepository;
 
-	@Autowired
+	@MockitoSpyBean
 	private NotificationProcessingService processingService;
 
 	@Autowired
@@ -190,6 +192,42 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 		assertThat(attempts).hasSize(2);
 		assertThat(attempts.get(0).getResult()).isEqualTo(AttemptResult.FAILED);
 		assertThat(attempts.get(1).getResult()).isEqualTo(AttemptResult.SUCCESS);
+	}
+
+	@Test
+	void runOnce_sendSucceeds_butRecordSuccessFails_doesNotMarkFailed() {
+		// 발송은 성공했는데 결과 기록이 실패한 경우 — 절대 PENDING/DEAD_LETTER로 떨어지면 안 됨
+		// (그러면 다음 cycle에서 사용자에게 중복 발송)
+		Notification saved = notificationRepository.saveAndFlush(Notification.create(
+			"user-record-fail",
+			NotificationType.ENROLLMENT_CONFIRMED,
+			"ref-record-fail",
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Test", "startDate", "2026-05-01"),
+			null
+		));
+
+		doThrow(new RuntimeException("simulated DB blip on recordSuccess"))
+			.when(processingService).recordSuccess(any(), any());
+
+		int processed = worker.runOnce();
+
+		// 발송은 실제로 일어났어야 함
+		verify(emailSender).send(any(), any());
+		assertThat(processed).isEqualTo(1);
+
+		// row는 PROCESSING으로 남고, recordFailure는 절대 호출되지 않아야 함
+		Notification reloaded = notificationRepository.findById(saved.getId()).orElseThrow();
+		assertThat(reloaded.getStatus())
+			.as("Must NOT regress to PENDING/DEAD_LETTER on recordSuccess failure — that would cause duplicate delivery")
+			.isEqualTo(NotificationStatus.PROCESSING);
+		assertThat(reloaded.getRetryCount()).isEqualTo(0);
+
+		verify(processingService, never()).recordFailure(any(), any());
+
+		// 결과 기록이 실패했으므로 attempt 행은 없음 (recordSuccess와 같은 tx)
+		assertThat(attemptRepository.findByNotificationIdOrderByAttemptNoAsc(saved.getId()))
+			.isEmpty();
 	}
 
 	@Test
