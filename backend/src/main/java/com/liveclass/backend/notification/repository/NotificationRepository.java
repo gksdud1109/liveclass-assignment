@@ -46,11 +46,8 @@ public interface NotificationRepository extends JpaRepository<Notification, Long
 	);
 
 	/**
-	 * 다중 워커 인스턴스 환경에서 안전한 batch claim용 ID 조회.
-	 *
-	 * <p>SELECT...FOR UPDATE SKIP LOCKED — 이미 다른 트랜잭션이 락을 잡은 행은 건너뛰고
-	 * 가용한 PENDING 행만 가져옴. 동일 트랜잭션 내에서 후속 markProcessing UPDATE까지 함께 묶어
-	 * COMMIT 시점에 락 해제되도록 한다.
+	 * 다중 워커 환경에서 batch claim용 PENDING ID 조회.
+	 * SKIP LOCKED로 다른 워커가 잡은 행은 건너뛰며, 같은 트랜잭션의 markProcessing 까지 묶어 COMMIT 시 락 해제.
 	 */
 	@Query(value = """
 		SELECT id FROM notification
@@ -80,12 +77,8 @@ public interface NotificationRepository extends JpaRepository<Notification, Long
 	);
 
 	/**
-	 * 임계치보다 오래 PROCESSING으로 머무는 행을 복구한다.
-	 *
-	 * <p><b>정책:</b> retry_count를 증가시키며, maxRetry 도달 시 DEAD_LETTER로 전이.
-	 * 워커 크래시와 "발송 성공 + recordSuccess 실패"를 DB만 보고는 구분 불가하므로,
-	 * 무한 복구 → 무한 중복 발송 가능성을 차단하기 위해 보수적으로 1회 실패 카운트.
-	 * 정확한 실패 횟수보다 무한 루프 방지를 우선시한다.
+	 * 임계치 초과 PROCESSING 행을 복구한다.
+	 * retry_count를 1 증가시키고 maxRetry 도달 시 DEAD_LETTER로 전이 — 무한 중복 발송 루프 차단을 위한 보수적 정책.
 	 */
 	@Modifying(clearAutomatically = true)
 	@Query("""

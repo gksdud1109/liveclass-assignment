@@ -208,7 +208,7 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 		));
 
 		doThrow(new RuntimeException("simulated DB blip on recordSuccess"))
-			.when(processingService).recordSuccess(any(), any());
+			.when(processingService).recordSuccess(any(), any(), any());
 
 		int processed = worker.runOnce();
 
@@ -223,11 +223,68 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 			.isEqualTo(NotificationStatus.PROCESSING);
 		assertThat(reloaded.getRetryCount()).isEqualTo(0);
 
-		verify(processingService, never()).recordFailure(any(), any());
+		verify(processingService, never()).recordFailure(any(), any(), any());
 
 		// 결과 기록이 실패했으므로 attempt 행은 없음 (recordSuccess와 같은 tx)
 		assertThat(attemptRepository.findByNotificationIdOrderByAttemptNoAsc(saved.getId()))
 			.isEmpty();
+	}
+
+	@Test
+	void recordSuccess_workerIdMismatch_isSilentlyIgnored() {
+		// Race 시나리오: A가 claim → 지연 → sweeper가 PENDING 복구 → B가 다시 claim
+		// → A의 늦은 recordSuccess가 도착하면 B의 처리에 간섭하면 안 됨
+		Notification owned = persistOwnedByWorker("worker-B", NotificationStatus.PROCESSING, 0);
+
+		processingService.recordSuccess(
+			owned.getId(),
+			"worker-A-stale",
+			new com.liveclass.backend.notification.template.RenderedNotification("t", "b")
+		);
+
+		Notification reloaded = notificationRepository.findById(owned.getId()).orElseThrow();
+		assertThat(reloaded.getStatus())
+			.as("stale worker must not flip status of a row owned by another worker")
+			.isEqualTo(NotificationStatus.PROCESSING);
+		assertThat(reloaded.getWorkerId()).isEqualTo("worker-B");
+		assertThat(attemptRepository.findByNotificationIdOrderByAttemptNoAsc(owned.getId()))
+			.as("no attempt should be recorded for a stale worker")
+			.isEmpty();
+	}
+
+	@Test
+	void recordFailure_workerIdMismatch_isSilentlyIgnored() {
+		Notification owned = persistOwnedByWorker("worker-B", NotificationStatus.PROCESSING, 0);
+
+		processingService.recordFailure(
+			owned.getId(),
+			"worker-A-stale",
+			"stale worker error"
+		);
+
+		Notification reloaded = notificationRepository.findById(owned.getId()).orElseThrow();
+		assertThat(reloaded.getStatus()).isEqualTo(NotificationStatus.PROCESSING);
+		assertThat(reloaded.getRetryCount())
+			.as("stale worker must not bump retry_count of a row owned by another worker")
+			.isEqualTo(0);
+		assertThat(reloaded.getLastError()).isNull();
+		assertThat(attemptRepository.findByNotificationIdOrderByAttemptNoAsc(owned.getId())).isEmpty();
+	}
+
+	private Notification persistOwnedByWorker(String workerId, NotificationStatus status, int retryCount) {
+		Notification n = notificationRepository.saveAndFlush(Notification.create(
+			"user-" + workerId,
+			NotificationType.ENROLLMENT_CONFIRMED,
+			"ref-" + workerId + "-" + System.nanoTime(),
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Test", "startDate", "2026-05-01"),
+			null
+		));
+		ReflectionTestUtils.setField(n, "status", status);
+		ReflectionTestUtils.setField(n, "workerId", workerId);
+		ReflectionTestUtils.setField(n, "processingStartedAt", LocalDateTime.now());
+		ReflectionTestUtils.setField(n, "retryCount", retryCount);
+		return notificationRepository.saveAndFlush(n);
 	}
 
 	@Test
