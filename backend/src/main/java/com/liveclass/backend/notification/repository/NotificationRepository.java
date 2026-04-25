@@ -80,24 +80,34 @@ public interface NotificationRepository extends JpaRepository<Notification, Long
 	);
 
 	/**
-	 * 임계치보다 오래 PROCESSING으로 머무는 행을 PENDING으로 되돌린다.
-	 * retry_count는 증가시키지 않음 — 워커 크래시는 send 실패와 다르기 때문.
+	 * 임계치보다 오래 PROCESSING으로 머무는 행을 복구한다.
+	 *
+	 * <p><b>정책:</b> retry_count를 증가시키며, maxRetry 도달 시 DEAD_LETTER로 전이.
+	 * 워커 크래시와 "발송 성공 + recordSuccess 실패"를 DB만 보고는 구분 불가하므로,
+	 * 무한 복구 → 무한 중복 발송 가능성을 차단하기 위해 보수적으로 1회 실패 카운트.
+	 * 정확한 실패 횟수보다 무한 루프 방지를 우선시한다.
 	 */
 	@Modifying(clearAutomatically = true)
 	@Query("""
 		UPDATE Notification n
-		SET n.status = :pendingStatus,
+		SET n.retryCount = n.retryCount + 1,
+		    n.status = CASE WHEN n.retryCount + 1 >= n.maxRetry
+		                    THEN :deadLetterStatus
+		                    ELSE :pendingStatus END,
 		    n.nextAttemptAt = :now,
 		    n.processingStartedAt = null,
-		    n.workerId = null
+		    n.workerId = null,
+		    n.lastError = :reason
 		WHERE n.status = :processingStatus
 		  AND n.processingStartedAt < :threshold
 		""")
 	int recoverStuck(
 		@Param("processingStatus") NotificationStatus processingStatus,
 		@Param("pendingStatus") NotificationStatus pendingStatus,
+		@Param("deadLetterStatus") NotificationStatus deadLetterStatus,
 		@Param("threshold") LocalDateTime threshold,
-		@Param("now") LocalDateTime now
+		@Param("now") LocalDateTime now,
+		@Param("reason") String reason
 	);
 
 	/**

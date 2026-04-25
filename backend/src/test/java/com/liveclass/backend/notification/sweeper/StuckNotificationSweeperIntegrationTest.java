@@ -37,7 +37,7 @@ class StuckNotificationSweeperIntegrationTest extends PostgresContainerTest {
 	}
 
 	@Test
-	void recoverStuckNotifications_resetsOldProcessingRowsToPending() {
+	void recoverStuckNotifications_resetsOldProcessingRowsToPending_andBumpsRetryCount() {
 		Notification stuck = persistProcessingRow(
 			"user-stuck",
 			LocalDateTime.now().minusMinutes(10),
@@ -60,8 +60,9 @@ class StuckNotificationSweeperIntegrationTest extends PostgresContainerTest {
 		assertThat(reloadedStuck.getProcessingStartedAt()).isNull();
 		assertThat(reloadedStuck.getWorkerId()).isNull();
 		assertThat(reloadedStuck.getRetryCount())
-			.as("retry_count must NOT bump on recovery — worker crash != send failure")
-			.isEqualTo(3);
+			.as("retry_count bumps on recovery — conservative policy to prevent infinite duplicate-send loops")
+			.isEqualTo(4);
+		assertThat(reloadedStuck.getLastError()).contains("stuck recovery");
 		assertThat(reloadedStuck.getNextAttemptAt()).isAfterOrEqualTo(LocalDateTime.now().minusSeconds(2));
 
 		Notification reloadedFresh = notificationRepository.findById(fresh.getId()).orElseThrow();
@@ -69,6 +70,7 @@ class StuckNotificationSweeperIntegrationTest extends PostgresContainerTest {
 			.as("rows below threshold should remain PROCESSING")
 			.isEqualTo(NotificationStatus.PROCESSING);
 		assertThat(reloadedFresh.getWorkerId()).isEqualTo("worker-fresh");
+		assertThat(reloadedFresh.getRetryCount()).isEqualTo(1);
 	}
 
 	@Test
@@ -78,6 +80,31 @@ class StuckNotificationSweeperIntegrationTest extends PostgresContainerTest {
 		int recovered = sweeper.recoverStuckNotifications();
 
 		assertThat(recovered).isEqualTo(0);
+	}
+
+	@Test
+	void recoverStuckNotifications_atMaxRetryThreshold_transitionsToDeadLetter() {
+		// retry_count=4 + sweep 시 +1 = 5 = maxRetry → DEAD_LETTER 전이
+		// 무한 복구 → 무한 중복 발송 루프 차단을 보장하는 핵심 테스트
+		Notification stuck = persistProcessingRow(
+			"user-loop-victim",
+			LocalDateTime.now().minusMinutes(10),
+			"worker-stale",
+			4
+		);
+
+		int recovered = sweeper.recoverStuckNotifications();
+
+		assertThat(recovered).isEqualTo(1);
+
+		Notification reloaded = notificationRepository.findById(stuck.getId()).orElseThrow();
+		assertThat(reloaded.getStatus())
+			.as("repeated stuck recovery must terminate at DEAD_LETTER, not loop forever")
+			.isEqualTo(NotificationStatus.DEAD_LETTER);
+		assertThat(reloaded.getRetryCount()).isEqualTo(5);
+		assertThat(reloaded.getProcessingStartedAt()).isNull();
+		assertThat(reloaded.getWorkerId()).isNull();
+		assertThat(reloaded.getLastError()).contains("stuck recovery");
 	}
 
 	private Notification persistProcessingRow(
