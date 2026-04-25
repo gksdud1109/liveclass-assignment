@@ -56,9 +56,15 @@ public class NotificationProcessingService {
 	}
 
 	@Transactional(readOnly = true)
-	public Notification fetchForProcessing(Long id) {
-		return notificationRepository.findById(id)
+	public Notification fetchOwnedForProcessing(Long id, String expectedWorkerId) {
+		Notification notification = notificationRepository.findById(id)
 			.orElseThrow(() -> new BusinessException(NotificationErrorCode.NOTIFICATION_NOT_FOUND));
+		if (!isOwnedBy(notification, expectedWorkerId)) {
+			log.warn("Worker {} attempted fetch on id={} now owned by {} — skipping send",
+				expectedWorkerId, id, notification.getWorkerId());
+			return null;
+		}
+		return notification;
 	}
 
 	/**

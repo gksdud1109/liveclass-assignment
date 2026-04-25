@@ -60,7 +60,10 @@ public class NotificationWorker {
 		Notification notification;
 		RenderedNotification rendered;
 		try {
-			notification = processingService.fetchForProcessing(id);
+			notification = processingService.fetchOwnedForProcessing(id, workerId);
+			if (notification == null) {
+				return;
+			}
 			rendered = renderer.render(
 				notification.getNotificationType(),
 				notification.getChannel(),

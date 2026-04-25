@@ -257,6 +257,27 @@ class NotificationApiIntegrationTest {
 	}
 
 	@Test
+	void markRead_emailChannel_returns400_andDoesNotSetReadAt() throws Exception {
+		Notification email = repository.saveAndFlush(Notification.create(
+			"user-email-read",
+			NotificationType.ENROLLMENT_CONFIRMED,
+			"ref-email-read",
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Test", "startDate", "2026-05-01"),
+			null
+		));
+
+		mockMvc.perform(post("/api/notifications/{id}/read", email.getId()))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.code").value("READ_NOT_SUPPORTED_FOR_CHANNEL"));
+
+		Notification reloaded = repository.findById(email.getId()).orElseThrow();
+		assertThat(reloaded.getReadAt())
+			.as("EMAIL channel must not be readable; readAt remains null")
+			.isNull();
+	}
+
+	@Test
 	void search_readFilter_separatesReadFromUnread() throws Exception {
 		Notification a = repository.saveAndFlush(Notification.create(
 			"user-rf", NotificationType.ENROLLMENT_CONFIRMED, "rf-1",
