@@ -11,6 +11,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.IntStream;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -22,9 +23,14 @@ import com.liveclass.backend.notification.domain.NotificationType;
 import com.liveclass.backend.notification.dto.CreateNotificationRequest;
 import com.liveclass.backend.notification.repository.NotificationRepository;
 import com.liveclass.backend.notification.service.NotificationService.RegisterResult;
+import com.liveclass.backend.support.PostgresContainerTest;
 
-@SpringBootTest
-class NotificationServiceConcurrencyTest {
+/**
+ * 멱등성 보증의 최종 진실원천은 DB unique 제약. 이 테스트는 실제 PostgreSQL 컨테이너에서
+ * 동시 INSERT가 unique 제약으로 직렬화되는지 검증한다.
+ */
+@SpringBootTest(properties = "notification.worker.scheduling-enabled=false")
+class NotificationServiceConcurrencyTest extends PostgresContainerTest {
 
 	@Autowired
 	private NotificationService service;
@@ -52,7 +58,7 @@ class NotificationServiceConcurrencyTest {
 			null
 		);
 
-		List<Future<RegisterResult>> futures = java.util.stream.IntStream.range(0, threads)
+		List<Future<RegisterResult>> futures = IntStream.range(0, threads)
 			.mapToObj(i -> executor.submit(() -> {
 				startLatch.await();
 				return service.register(request);
