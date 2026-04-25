@@ -152,6 +152,10 @@ public class Notification extends BaseEntity {
 	}
 
 	public void resetForManualRetry(boolean resetRetryCount) {
+		if (this.status != NotificationStatus.DEAD_LETTER) {
+			throw new IllegalStateException(
+				"resetForManualRetry requires DEAD_LETTER status, got " + this.status);
+		}
 		this.status = NotificationStatus.PENDING;
 		this.nextAttemptAt = LocalDateTime.now();
 		this.lastError = null;

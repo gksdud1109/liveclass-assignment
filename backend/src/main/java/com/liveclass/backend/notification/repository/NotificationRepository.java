@@ -67,10 +67,11 @@ public interface NotificationRepository extends JpaRepository<Notification, Long
 		SET n.status = :status,
 		    n.processingStartedAt = :now,
 		    n.workerId = :workerId
-		WHERE n.id IN :ids
+		WHERE n.id IN :ids AND n.status = :expectedStatus
 		""")
 	int markProcessing(
 		@Param("status") NotificationStatus status,
+		@Param("expectedStatus") NotificationStatus expectedStatus,
 		@Param("now") LocalDateTime now,
 		@Param("workerId") String workerId,
 		@Param("ids") List<Long> ids

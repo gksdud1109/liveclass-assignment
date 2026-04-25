@@ -44,7 +44,13 @@ public class NotificationProcessingService {
 		if (ids.isEmpty()) {
 			return List.of();
 		}
-		notificationRepository.markProcessing(NotificationStatus.PROCESSING, now, workerId, ids);
+		notificationRepository.markProcessing(
+			NotificationStatus.PROCESSING,
+			NotificationStatus.PENDING,
+			now,
+			workerId,
+			ids
+		);
 		log.debug("Claimed {} notifications by worker={}", ids.size(), workerId);
 		return ids;
 	}
