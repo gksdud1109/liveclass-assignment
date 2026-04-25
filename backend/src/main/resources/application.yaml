@@ -9,6 +9,16 @@ spring:
       hibernate:
         format_sql: true
 
+notification:
+  worker:
+    poll-interval-ms: 1000
+    batch-size: 50
+    scheduling-enabled: true
+  sweeper:
+    poll-interval-ms: 60000
+    threshold-seconds: 300
+    scheduling-enabled: true
+
 logging:
   level:
     org.hibernate.SQL: debug

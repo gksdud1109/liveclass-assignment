@@ -78,4 +78,34 @@ public interface NotificationRepository extends JpaRepository<Notification, Long
 		@Param("workerId") String workerId,
 		@Param("ids") List<Long> ids
 	);
+
+	/**
+	 * 임계치보다 오래 PROCESSING으로 머무는 행을 PENDING으로 되돌린다.
+	 * retry_count는 증가시키지 않음 — 워커 크래시는 send 실패와 다르기 때문.
+	 */
+	@Modifying(clearAutomatically = true)
+	@Query("""
+		UPDATE Notification n
+		SET n.status = :pendingStatus,
+		    n.nextAttemptAt = :now,
+		    n.processingStartedAt = null,
+		    n.workerId = null
+		WHERE n.status = :processingStatus
+		  AND n.processingStartedAt < :threshold
+		""")
+	int recoverStuck(
+		@Param("processingStatus") NotificationStatus processingStatus,
+		@Param("pendingStatus") NotificationStatus pendingStatus,
+		@Param("threshold") LocalDateTime threshold,
+		@Param("now") LocalDateTime now
+	);
+
+	/**
+	 * 동시 읽음 처리 멱등성: COALESCE로 read_at의 최초 값만 유지.
+	 * 여러 기기에서 동시에 호출되어도 첫 호출의 시각만 저장된다.
+	 */
+	@Modifying(clearAutomatically = true)
+	@Query(value = "UPDATE notification SET read_at = COALESCE(read_at, :now) WHERE id = :id",
+		nativeQuery = true)
+	int markRead(@Param("id") Long id, @Param("now") LocalDateTime now);
 }

@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.time.LocalDateTime;
 import java.util.Map;
 
 import org.junit.jupiter.api.AfterEach;
@@ -14,6 +15,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
@@ -21,6 +23,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.liveclass.backend.notification.domain.Notification;
 import com.liveclass.backend.notification.domain.NotificationChannel;
+import com.liveclass.backend.notification.domain.NotificationStatus;
 import com.liveclass.backend.notification.domain.NotificationType;
 import com.liveclass.backend.notification.dto.CreateNotificationRequest;
 import com.liveclass.backend.notification.repository.NotificationRepository;
@@ -158,6 +161,141 @@ class NotificationApiIntegrationTest {
 			.andExpect(status().isOk())
 			.andExpect(jsonPath("$.totalElements").value(1))
 			.andExpect(jsonPath("$.content[0].notificationType").value("PAYMENT_CONFIRMED"));
+	}
+
+	@Test
+	void retry_deadLetter_returnsPending_andKeepsRetryCount() throws Exception {
+		Notification deadLetter = persistDeadLetter("user-dl-1", "ref-dl-1", 5);
+
+		mockMvc.perform(post("/api/notifications/{id}/retry", deadLetter.getId())
+				.contentType(MediaType.APPLICATION_JSON)
+				.content("{\"resetRetryCount\": false}"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.id").value(deadLetter.getId()))
+			.andExpect(jsonPath("$.status").value("PENDING"))
+			.andExpect(jsonPath("$.retryCount").value(5));
+	}
+
+	@Test
+	void retry_deadLetter_withResetTrue_clearsRetryCount() throws Exception {
+		Notification deadLetter = persistDeadLetter("user-dl-2", "ref-dl-2", 5);
+
+		mockMvc.perform(post("/api/notifications/{id}/retry", deadLetter.getId())
+				.contentType(MediaType.APPLICATION_JSON)
+				.content("{\"resetRetryCount\": true}"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status").value("PENDING"))
+			.andExpect(jsonPath("$.retryCount").value(0));
+	}
+
+	@Test
+	void retry_emptyBody_defaultsToNotResetting() throws Exception {
+		Notification deadLetter = persistDeadLetter("user-dl-3", "ref-dl-3", 5);
+
+		mockMvc.perform(post("/api/notifications/{id}/retry", deadLetter.getId()))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.status").value("PENDING"))
+			.andExpect(jsonPath("$.retryCount").value(5));
+	}
+
+	@Test
+	void retry_pendingNotification_returns400_NOT_DEAD_LETTER() throws Exception {
+		Notification pending = repository.saveAndFlush(Notification.create(
+			"user-pending", NotificationType.ENROLLMENT_CONFIRMED, "ref-pending",
+			NotificationChannel.EMAIL, Map.of("courseTitle", "Test"), null));
+
+		mockMvc.perform(post("/api/notifications/{id}/retry", pending.getId()))
+			.andExpect(status().isBadRequest())
+			.andExpect(jsonPath("$.code").value("NOT_DEAD_LETTER"));
+	}
+
+	@Test
+	void retry_notFound_returns404() throws Exception {
+		mockMvc.perform(post("/api/notifications/{id}/retry", 999_999L))
+			.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void markRead_unread_setsReadAt() throws Exception {
+		Notification saved = repository.saveAndFlush(Notification.create(
+			"user-read-1", NotificationType.ENROLLMENT_CONFIRMED, "ref-r1",
+			NotificationChannel.IN_APP, Map.of("courseTitle", "Test"), null));
+
+		mockMvc.perform(post("/api/notifications/{id}/read", saved.getId()))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.readAt").isNotEmpty());
+
+		Notification reloaded = repository.findById(saved.getId()).orElseThrow();
+		assertThat(reloaded.getReadAt()).isNotNull();
+	}
+
+	@Test
+	void markRead_alreadyRead_keepsOriginalTimestamp() throws Exception {
+		Notification saved = repository.saveAndFlush(Notification.create(
+			"user-read-2", NotificationType.ENROLLMENT_CONFIRMED, "ref-r2",
+			NotificationChannel.IN_APP, Map.of("courseTitle", "Test"), null));
+
+		mockMvc.perform(post("/api/notifications/{id}/read", saved.getId()))
+			.andExpect(status().isOk());
+		LocalDateTime firstReadAt = repository.findById(saved.getId()).orElseThrow().getReadAt();
+
+		Thread.sleep(20);
+
+		mockMvc.perform(post("/api/notifications/{id}/read", saved.getId()))
+			.andExpect(status().isOk());
+		LocalDateTime secondReadAt = repository.findById(saved.getId()).orElseThrow().getReadAt();
+
+		assertThat(secondReadAt)
+			.as("Second mark-read must NOT overwrite the first timestamp (COALESCE)")
+			.isEqualTo(firstReadAt);
+	}
+
+	@Test
+	void markRead_notFound_returns404() throws Exception {
+		mockMvc.perform(post("/api/notifications/{id}/read", 999_999L))
+			.andExpect(status().isNotFound());
+	}
+
+	@Test
+	void search_readFilter_separatesReadFromUnread() throws Exception {
+		Notification a = repository.saveAndFlush(Notification.create(
+			"user-rf", NotificationType.ENROLLMENT_CONFIRMED, "rf-1",
+			NotificationChannel.IN_APP, Map.of("courseTitle", "A"), null));
+		Notification b = repository.saveAndFlush(Notification.create(
+			"user-rf", NotificationType.PAYMENT_CONFIRMED, "rf-2",
+			NotificationChannel.IN_APP, Map.of("courseTitle", "B"), null));
+
+		mockMvc.perform(post("/api/notifications/{id}/read", a.getId()))
+			.andExpect(status().isOk());
+
+		mockMvc.perform(get("/api/notifications")
+				.param("recipientId", "user-rf")
+				.param("read", "true"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.totalElements").value(1))
+			.andExpect(jsonPath("$.content[0].id").value(a.getId()));
+
+		mockMvc.perform(get("/api/notifications")
+				.param("recipientId", "user-rf")
+				.param("read", "false"))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.totalElements").value(1))
+			.andExpect(jsonPath("$.content[0].id").value(b.getId()));
+	}
+
+	private Notification persistDeadLetter(String recipientId, String referenceId, int retryCount) {
+		Notification n = repository.saveAndFlush(Notification.create(
+			recipientId,
+			NotificationType.ENROLLMENT_CONFIRMED,
+			referenceId,
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Test", "startDate", "2026-05-01"),
+			null
+		));
+		ReflectionTestUtils.setField(n, "status", NotificationStatus.DEAD_LETTER);
+		ReflectionTestUtils.setField(n, "retryCount", retryCount);
+		ReflectionTestUtils.setField(n, "lastError", "max retry exceeded");
+		return repository.saveAndFlush(n);
 	}
 
 	private long readId(MvcResult result) throws Exception {

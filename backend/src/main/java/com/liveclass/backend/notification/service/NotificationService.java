@@ -1,11 +1,13 @@
 package com.liveclass.backend.notification.service;
 
+import java.time.LocalDateTime;
 import java.util.Optional;
 
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.liveclass.backend.global.error.exception.BusinessException;
 import com.liveclass.backend.notification.domain.Notification;
@@ -65,6 +67,27 @@ public class NotificationService {
 		Pageable pageable
 	) {
 		return notificationRepository.search(recipientId, status, channel, type, readFilter, pageable);
+	}
+
+	@Transactional
+	public Notification retry(Long id, boolean resetRetryCount) {
+		Notification notification = notificationRepository.findById(id)
+			.orElseThrow(() -> new BusinessException(NotificationErrorCode.NOTIFICATION_NOT_FOUND));
+		if (!notification.isDeadLetter()) {
+			throw new BusinessException(NotificationErrorCode.NOT_DEAD_LETTER);
+		}
+		notification.resetForManualRetry(resetRetryCount);
+		return notification;
+	}
+
+	@Transactional
+	public Notification markRead(Long id) {
+		int updated = notificationRepository.markRead(id, LocalDateTime.now());
+		if (updated == 0) {
+			throw new BusinessException(NotificationErrorCode.NOTIFICATION_NOT_FOUND);
+		}
+		return notificationRepository.findById(id)
+			.orElseThrow(() -> new BusinessException(NotificationErrorCode.NOTIFICATION_NOT_FOUND));
 	}
 
 	private Optional<Notification> lookupDedup(CreateNotificationRequest request) {

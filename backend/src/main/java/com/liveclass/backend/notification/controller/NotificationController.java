@@ -20,6 +20,7 @@ import com.liveclass.backend.notification.domain.NotificationType;
 import com.liveclass.backend.notification.dto.CreateNotificationRequest;
 import com.liveclass.backend.notification.dto.CreateNotificationResponse;
 import com.liveclass.backend.notification.dto.NotificationResponse;
+import com.liveclass.backend.notification.dto.RetryRequest;
 import com.liveclass.backend.notification.service.NotificationService;
 import com.liveclass.backend.notification.service.NotificationService.RegisterResult;
 
@@ -60,5 +61,19 @@ public class NotificationController {
 	) {
 		return service.search(recipientId, status, channel, type, readFilter, pageable)
 			.map(NotificationResponse::from);
+	}
+
+	@PostMapping("/{id}/retry")
+	public NotificationResponse retry(
+		@PathVariable Long id,
+		@RequestBody(required = false) RetryRequest request
+	) {
+		boolean resetRetryCount = request != null && request.resetRetryCount();
+		return NotificationResponse.from(service.retry(id, resetRetryCount));
+	}
+
+	@PostMapping("/{id}/read")
+	public NotificationResponse markRead(@PathVariable Long id) {
+		return NotificationResponse.from(service.markRead(id));
 	}
 }
