@@ -36,6 +36,7 @@ import com.liveclass.backend.notification.sender.EmailSender;
 import com.liveclass.backend.notification.sender.NotificationDispatcher;
 import com.liveclass.backend.notification.sender.NotificationSendException;
 import com.liveclass.backend.notification.service.NotificationProcessingService;
+import com.liveclass.backend.notification.sweeper.StuckNotificationSweeper;
 import com.liveclass.backend.notification.template.NotificationTemplateRenderer;
 import com.liveclass.backend.support.PostgresContainerTest;
 
@@ -62,6 +63,9 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 
 	@MockitoSpyBean
 	private EmailSender emailSender;
+
+	@Autowired
+	private StuckNotificationSweeper sweeper;
 
 	@AfterEach
 	void cleanup() {
@@ -195,6 +199,37 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 	}
 
 	@Test
+	void runOnce_futureScheduledNotification_isNotClaimedUntilDue() {
+		Notification scheduled = notificationRepository.saveAndFlush(Notification.create(
+			"user-future",
+			NotificationType.ENROLLMENT_CONFIRMED,
+			"ref-future",
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Scheduled Test", "startDate", "2026-05-01"),
+			LocalDateTime.now().plusMinutes(10)
+		));
+
+		int processed = worker.runOnce();
+
+		assertThat(processed).isEqualTo(0);
+		verify(emailSender, never()).send(any(), any());
+
+		Notification reloaded = notificationRepository.findById(scheduled.getId()).orElseThrow();
+		assertThat(reloaded.getStatus()).isEqualTo(NotificationStatus.PENDING);
+		assertThat(reloaded.getSentAt()).isNull();
+		assertThat(attemptRepository.findByNotificationIdOrderByAttemptNoAsc(scheduled.getId())).isEmpty();
+	}
+
+	@Test
+	void fetchOwnedForProcessing_staleWorkerOwnership_returnsNull() {
+		Notification owned = persistOwnedByWorker("worker-B", NotificationStatus.PROCESSING, 0);
+
+		Notification fetched = processingService.fetchOwnedForProcessing(owned.getId(), "worker-A-stale");
+
+		assertThat(fetched).isNull();
+	}
+
+	@Test
 	void runOnce_sendSucceeds_butRecordSuccessFails_doesNotMarkFailed() {
 		// 발송은 성공했는데 결과 기록이 실패한 경우 — 절대 PENDING/DEAD_LETTER로 떨어지면 안 됨
 		// (그러면 다음 cycle에서 사용자에게 중복 발송)
@@ -228,6 +263,57 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 		// 결과 기록이 실패했으므로 attempt 행은 없음 (recordSuccess와 같은 tx)
 		assertThat(attemptRepository.findByNotificationIdOrderByAttemptNoAsc(saved.getId()))
 			.isEmpty();
+	}
+
+	@Test
+	void runOnce_recordFailure_throws_rowStaysProcessing_andSweeperRecovers() {
+		// send 실패 후 recordFailure 자체도 DB 오류로 실패하는 시나리오.
+		// 이 트랜잭션은 롤백되어 row가 PROCESSING에 잔류하지만, stuck sweeper가 임계치 초과 시 회수한다.
+		Notification saved = notificationRepository.saveAndFlush(Notification.create(
+			"user-record-failure",
+			NotificationType.ENROLLMENT_CONFIRMED,
+			"ref-record-failure",
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Test", "startDate", "2026-05-01"),
+			null
+		));
+
+		doThrow(new NotificationSendException("simulated send failure"))
+			.when(emailSender).send(any(), any());
+		doThrow(new RuntimeException("simulated DB blip on recordFailure"))
+			.when(processingService).recordFailure(any(), any(), any());
+
+		int processed = worker.runOnce();
+
+		assertThat(processed).isEqualTo(1);
+		verify(emailSender).send(any(), any());
+		verify(processingService).recordFailure(any(), any(), any());
+
+		// recordFailure tx 롤백 → 상태 변경 미반영, attempt 미기록
+		Notification afterWorker = notificationRepository.findById(saved.getId()).orElseThrow();
+		assertThat(afterWorker.getStatus())
+			.as("recordFailure throwing means tx rolled back; row stays in PROCESSING")
+			.isEqualTo(NotificationStatus.PROCESSING);
+		assertThat(afterWorker.getRetryCount()).isEqualTo(0);
+		assertThat(afterWorker.getLastError()).isNull();
+		assertThat(attemptRepository.findByNotificationIdOrderByAttemptNoAsc(saved.getId()))
+			.isEmpty();
+
+		// 시뮬레이션: processing_started_at을 임계치 이전으로 강제하여 stuck 상태 재현
+		ReflectionTestUtils.setField(afterWorker, "processingStartedAt", LocalDateTime.now().minusMinutes(10));
+		notificationRepository.saveAndFlush(afterWorker);
+
+		int recovered = sweeper.recoverStuckNotifications();
+
+		assertThat(recovered).isEqualTo(1);
+		Notification afterSweeper = notificationRepository.findById(saved.getId()).orElseThrow();
+		assertThat(afterSweeper.getStatus())
+			.as("sweeper restores stuck rows so they are not lost")
+			.isEqualTo(NotificationStatus.PENDING);
+		assertThat(afterSweeper.getRetryCount())
+			.as("sweeper conservatively bumps retry_count to bound duplicate sends")
+			.isEqualTo(1);
+		assertThat(afterSweeper.getLastError()).contains("stuck recovery");
 	}
 
 	@Test
@@ -285,6 +371,47 @@ class NotificationWorkerIntegrationTest extends PostgresContainerTest {
 		ReflectionTestUtils.setField(n, "processingStartedAt", LocalDateTime.now());
 		ReflectionTestUtils.setField(n, "retryCount", retryCount);
 		return notificationRepository.saveAndFlush(n);
+	}
+
+	@Test
+	void runOnce_scheduledForFuture_isNotPickedUp() {
+		Notification scheduled = notificationRepository.saveAndFlush(Notification.create(
+			"user-scheduled",
+			NotificationType.CLASS_STARTING_SOON,
+			"class-future",
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Future Class", "startAt", "2026-12-01T10:00"),
+			LocalDateTime.now().plusMinutes(30)
+		));
+
+		int processed = worker.runOnce();
+
+		assertThat(processed)
+			.as("future-scheduled notifications must not be picked up before nextAttemptAt")
+			.isEqualTo(0);
+		Notification reloaded = notificationRepository.findById(scheduled.getId()).orElseThrow();
+		assertThat(reloaded.getStatus()).isEqualTo(NotificationStatus.PENDING);
+		assertThat(reloaded.getScheduledAt()).isAfter(LocalDateTime.now());
+		assertThat(reloaded.getSentAt()).isNull();
+	}
+
+	@Test
+	void runOnce_scheduledTimeReached_isProcessed() {
+		Notification scheduled = notificationRepository.saveAndFlush(Notification.create(
+			"user-scheduled-reached",
+			NotificationType.CLASS_STARTING_SOON,
+			"class-now",
+			NotificationChannel.EMAIL,
+			Map.of("courseTitle", "Imminent Class", "startAt", "2026-05-01T10:00"),
+			LocalDateTime.now().minusSeconds(1)
+		));
+
+		int processed = worker.runOnce();
+
+		assertThat(processed).isEqualTo(1);
+		Notification reloaded = notificationRepository.findById(scheduled.getId()).orElseThrow();
+		assertThat(reloaded.getStatus()).isEqualTo(NotificationStatus.SENT);
+		assertThat(reloaded.getSentAt()).isNotNull();
 	}
 
 	@Test

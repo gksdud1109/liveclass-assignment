@@ -82,10 +82,12 @@ public class NotificationService {
 
 	@Transactional
 	public Notification markRead(Long id) {
-		int updated = notificationRepository.markRead(id, LocalDateTime.now());
-		if (updated == 0) {
-			throw new BusinessException(NotificationErrorCode.NOTIFICATION_NOT_FOUND);
+		Notification notification = notificationRepository.findById(id)
+			.orElseThrow(() -> new BusinessException(NotificationErrorCode.NOTIFICATION_NOT_FOUND));
+		if (notification.getChannel() != NotificationChannel.IN_APP) {
+			throw new BusinessException(NotificationErrorCode.READ_NOT_SUPPORTED_FOR_CHANNEL);
 		}
+		notificationRepository.markRead(id, LocalDateTime.now());
 		return notificationRepository.findById(id)
 			.orElseThrow(() -> new BusinessException(NotificationErrorCode.NOTIFICATION_NOT_FOUND));
 	}

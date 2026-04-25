@@ -12,7 +12,8 @@ import lombok.Getter;
 public enum NotificationErrorCode implements ErrorCode {
 
 	NOTIFICATION_NOT_FOUND(HttpStatus.NOT_FOUND, "알림을 찾을 수 없습니다."),
-	NOT_DEAD_LETTER(HttpStatus.BAD_REQUEST, "DEAD_LETTER 상태의 알림만 수동 재시도가 가능합니다.");
+	NOT_DEAD_LETTER(HttpStatus.BAD_REQUEST, "DEAD_LETTER 상태의 알림만 수동 재시도가 가능합니다."),
+	READ_NOT_SUPPORTED_FOR_CHANNEL(HttpStatus.BAD_REQUEST, "IN_APP 채널 알림만 읽음 처리가 가능합니다.");
 
 	private final HttpStatus httpStatus;
 	private final String message;
